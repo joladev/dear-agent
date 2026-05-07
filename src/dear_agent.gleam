@@ -21,9 +21,9 @@ import simplifile
 import wisp
 import wisp/wisp_mist
 
-pub type Entry {
+type Entry {
   Entry(
-    type_: String,
+    kind: Kind,
     ts: String,
     ip: String,
     user_agent: String,
@@ -33,15 +33,19 @@ pub type Entry {
   )
 }
 
+type Kind {
+  Post
+  Probe
+}
+
 pub fn main() -> Nil {
   wisp.configure_logger()
 
   let assert Ok(_) = simplifile.create_directory_all("/tmp/dear_agent")
   let name = process.new_name("entries")
-  let entries = case read_entries() {
-    Ok(entries) -> entries
-    Error(simplifile.Enoent) -> []
-    Error(_) -> panic as "failed to read log"
+  let assert Ok(entries) = case read_entries() {
+    Error(simplifile.Enoent) -> Ok([])
+    other -> other
   }
 
   let assert Ok(_) =
@@ -62,7 +66,7 @@ pub fn main() -> Nil {
   process.sleep_forever()
 }
 
-pub fn middleware(
+fn middleware(
   req: wisp.Request,
   handle_request: fn(wisp.Request) -> wisp.Response,
 ) -> wisp.Response {
@@ -75,7 +79,7 @@ pub fn middleware(
   handle_request(req)
 }
 
-pub fn handle_request(
+fn handle_request(
   req: wisp.Request,
   name: process.Name(Message),
 ) -> wisp.Response {
@@ -89,30 +93,27 @@ pub fn handle_request(
   }
 }
 
-pub fn handle_index(
+fn handle_index(
   req: wisp.Request,
   name: process.Name(Message),
 ) -> wisp.Response {
   use <- wisp.require_method(req, http.Get)
 
   let subject = process.named_subject(name)
-  let entries =
-    actor.call(subject, waiting: 1000, sending: fn(reply) {
-      GetRecentEntries(reply: reply)
-    })
+  let entries = actor.call(subject, waiting: 1000, sending: GetRecentEntries)
   let page = render_page(entries)
 
   wisp.html_body(wisp.ok(), page)
 }
 
-pub fn handle_post(
+fn handle_post(
   req: wisp.Request,
   name: process.Name(Message),
 ) -> wisp.Response {
   use <- wisp.require_method(req, http.Post)
   use body <- wisp.require_string_body(req)
 
-  case record(req, option.Some(body), "post") {
+  case record(req, option.Some(body), Post) {
     Ok(entry) -> {
       let subject = process.named_subject(name)
       process.send(subject, AddEntry(entry))
@@ -127,13 +128,13 @@ pub fn handle_post(
   }
 }
 
-pub fn handle_probe(
+fn handle_probe(
   req: wisp.Request,
   name: process.Name(Message),
 ) -> wisp.Response {
   use <- wisp.require_method(req, http.Get)
 
-  case record(req, option.None, "probe") {
+  case record(req, option.None, Probe) {
     Ok(entry) -> {
       let subject = process.named_subject(name)
       process.send(subject, AddEntry(entry))
@@ -148,12 +149,12 @@ pub fn handle_probe(
   }
 }
 
-pub type Message {
+type Message {
   AddEntry(entry: Entry)
   GetRecentEntries(reply: process.Subject(List(Entry)))
 }
 
-pub fn handle_message(
+fn handle_message(
   state: List(Entry),
   msg: Message,
 ) -> actor.Next(List(Entry), Message) {
@@ -166,12 +167,12 @@ pub fn handle_message(
   }
 }
 
-pub const log_file_path: String = "/tmp/dear_agent/log"
+const log_file_path: String = "/tmp/dear_agent/log"
 
-pub fn record(
+fn record(
   req: wisp.Request,
   body: option.Option(String),
-  t: String,
+  kind: Kind,
 ) -> Result(Entry, simplifile.FileError) {
   let headers =
     json.array(req.headers, of: fn(pair) {
@@ -183,50 +184,55 @@ pub fn record(
     result.unwrap(request.get_header(req, "user-agent"), "unknown")
   let x_forwarded_for =
     result.unwrap(request.get_header(req, "x-forwarded-for"), "")
-  let #(ip, _) =
-    result.unwrap(string.split_once(x_forwarded_for, ","), #("", ""))
-  let query_string = case req.query {
-    option.None -> json.string("")
-    option.Some(str) -> json.string(str)
+  let ip = case string.split(x_forwarded_for, on: ",") {
+    [first, ..] -> first
+    [] -> ""
   }
-  let actual_body = case body {
-    option.None -> json.string("")
-    option.Some(str) -> json.string(str)
-  }
+  let query_string = option.unwrap(req.query, "")
+  let actual_body = option.unwrap(body, "")
 
-  let json =
+  let payload =
     json.object([
       #("headers", headers),
       #("timestamp", json.string(stamp)),
       #("user_agent", json.string(user_agent)),
       #("ip", json.string(ip)),
-      #("query", query_string),
-      #("body", actual_body),
-      #("type", json.string(t)),
+      #("query", json.string(query_string)),
+      #("body", json.string(actual_body)),
+      #("type", json.string(kind_to_string(kind))),
     ])
 
-  let contents = json.to_string(json) <> "\n"
+  let contents = json.to_string(payload) <> "\n"
   use _ <- result.try(simplifile.append(to: log_file_path, contents: contents))
   Ok(Entry(
     headers: req.headers,
     ts: stamp,
     user_agent: user_agent,
     ip: ip,
-    query: option.unwrap(req.query, ""),
-    body: option.unwrap(body, ""),
-    type_: t,
+    query: query_string,
+    body: actual_body,
+    kind: kind,
   ))
 }
 
-pub fn read_entries() -> Result(List(Entry), simplifile.FileError) {
+fn read_entries() -> Result(List(Entry), simplifile.FileError) {
   let header_decoder = {
     use key <- decode.field(0, decode.string)
     use value <- decode.field(1, decode.string)
     decode.success(#(key, value))
   }
 
+  let kind_decoder =
+    decode.then(decode.string, fn(s) {
+      case s {
+        "post" -> decode.success(Post)
+        "probe" -> decode.success(Probe)
+        _ -> decode.failure(Post, "Kind")
+      }
+    })
+
   let decoder = {
-    use type_ <- decode.field("type", decode.string)
+    use kind <- decode.field("type", kind_decoder)
     use headers <- decode.field("headers", decode.list(header_decoder))
     use ts <- decode.field("timestamp", decode.string)
     use user_agent <- decode.field("user_agent", decode.string)
@@ -234,7 +240,7 @@ pub fn read_entries() -> Result(List(Entry), simplifile.FileError) {
     use query <- decode.field("query", decode.string)
     use body <- decode.field("body", decode.string)
     decode.success(Entry(
-      type_: type_,
+      kind: kind,
       headers: headers,
       ts: ts,
       user_agent: user_agent,
@@ -245,7 +251,7 @@ pub fn read_entries() -> Result(List(Entry), simplifile.FileError) {
   }
 
   use contents <- result.try(simplifile.read(log_file_path))
-  use entries: List(Entry) <- result.try(
+  use entries <- result.try(
     contents
     |> string.split(on: "\n")
     |> list.reverse()
@@ -258,7 +264,14 @@ pub fn read_entries() -> Result(List(Entry), simplifile.FileError) {
   Ok(entries)
 }
 
-pub fn render_page(entries: List(Entry)) -> String {
+fn kind_to_string(kind: Kind) -> String {
+  case kind {
+    Post -> "post"
+    Probe -> "probe"
+  }
+}
+
+fn render_page(entries: List(Entry)) -> String {
   let html =
     html([], [
       html.head([], [
@@ -275,7 +288,7 @@ pub fn render_page(entries: List(Entry)) -> String {
   element.to_document_string(html)
 }
 
-pub fn font() -> element.Element(msg) {
+fn font() -> element.Element(msg) {
   html.link([
     attribute.rel("stylesheet"),
     attribute.href(
@@ -301,10 +314,9 @@ fn entry_list(entries: List(Entry)) -> element.Element(msg) {
 }
 
 fn entry_view(entry: Entry) -> element.Element(msg) {
-  let #(method_text, method_mod, path_text) = case entry.type_ {
-    "post" -> #("POST", "post", "/post")
-    "probe" -> #("GET", "get", "/probe")
-    _ -> #(entry.type_, "", "/")
+  let #(method_text, method_mod, path_text) = case entry.kind {
+    Post -> #("POST", "post", "/post")
+    Probe -> #("GET", "get", "/probe")
   }
 
   let #(preview_text, preview_class) = case entry.body {
@@ -312,16 +324,15 @@ fn entry_view(entry: Entry) -> element.Element(msg) {
     body -> #(body, "col-preview")
   }
 
-  let conditional_rows = case entry.type_ {
-    "post" -> [
+  let conditional_rows = case entry.kind {
+    Post -> [
       html.span([attribute.class("label")], [element.text("Body")]),
       html.pre([attribute.class("v body")], [element.text(entry.body)]),
     ]
-    "probe" -> [
+    Probe -> [
       html.span([attribute.class("label")], [element.text("Query")]),
       html.span([attribute.class("v")], [element.text(entry.query)]),
     ]
-    _ -> []
   }
 
   let detail_children =
@@ -389,13 +400,12 @@ fn relative_time(timestamp_string: String) -> String {
       }
     }
     Error(_) -> {
-      wisp.log_warning("Failed to parse timestamp: " <> timestamp_string <> " ")
       "???"
     }
   }
 }
 
-pub fn style() -> element.Element(msg) {
+fn style() -> element.Element(msg) {
   let style =
     "
 :root {
