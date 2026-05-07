@@ -288,11 +288,7 @@ fn kind_to_string(kind: Kind) -> String {
 fn render_page(entries: List(Entry)) -> String {
   let html =
     html([], [
-      html.head([], [
-        html.title([], "Dear Agent"),
-        font(),
-        style(),
-      ]),
+      html.head([], [html.title([], "Dear Agent"), font(), style(), favicon()]),
       html.body([], [
         html.header([], [prompt_line(), stats_line(entries)]),
         entry_list(entries),
@@ -307,6 +303,17 @@ fn font() -> element.Element(msg) {
     attribute.rel("stylesheet"),
     attribute.href(
       "https://fonts.googleapis.com/css2?family=JetBrains+Mono&display=swap",
+    ),
+  ])
+}
+
+fn favicon() -> element.Element(msg) {
+  html.link([
+    attribute.rel("icon"),
+    attribute.attribute("type", "image/svg+xml"),
+    attribute.href(
+      "data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100
+  100'><text y='.9em' font-size='90'>🤖</text></svg>",
     ),
   ])
 }
