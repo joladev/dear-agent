@@ -21,7 +21,7 @@ import simplifile
 import wisp
 import wisp/wisp_mist
 
-type Entry {
+pub type Entry {
   Entry(
     kind: Kind,
     ts: String,
@@ -33,7 +33,7 @@ type Entry {
   )
 }
 
-type Kind {
+pub type Kind {
   Post
   Probe
 }
@@ -177,11 +177,6 @@ fn record(
   body: option.Option(String),
   kind: Kind,
 ) -> Result(Entry, simplifile.FileError) {
-  let headers =
-    json.array(req.headers, of: fn(pair) {
-      let #(k, v) = pair
-      json.array([k, v], of: json.string)
-    })
   let stamp = timestamp.to_rfc3339(timestamp.system_time(), calendar.utc_offset)
   let user_agent =
     result.unwrap(request.get_header(req, "user-agent"), "unknown")
@@ -194,31 +189,58 @@ fn record(
   let query_string = option.unwrap(req.query, "")
   let actual_body = option.unwrap(body, "")
 
+  let entry =
+    Entry(
+      headers: req.headers,
+      ts: stamp,
+      user_agent: user_agent,
+      ip: ip,
+      query: query_string,
+      body: actual_body,
+      kind: kind,
+    )
+
+  let payload = encode_entry(entry)
+  use _ <- result.try(simplifile.append(to: log_file_path, contents: payload))
+  Ok(entry)
+}
+
+pub fn encode_entry(entry: Entry) -> String {
+  let headers =
+    json.array(entry.headers, of: fn(pair) {
+      let #(k, v) = pair
+      json.array([k, v], of: json.string)
+    })
+
   let payload =
     json.object([
       #("headers", headers),
-      #("timestamp", json.string(stamp)),
-      #("user_agent", json.string(user_agent)),
-      #("ip", json.string(ip)),
-      #("query", json.string(query_string)),
-      #("body", json.string(actual_body)),
-      #("type", json.string(kind_to_string(kind))),
+      #("timestamp", json.string(entry.ts)),
+      #("user_agent", json.string(entry.user_agent)),
+      #("ip", json.string(entry.ip)),
+      #("query", json.string(entry.query)),
+      #("body", json.string(entry.body)),
+      #("type", json.string(kind_to_string(entry.kind))),
     ])
-
-  let contents = json.to_string(payload) <> "\n"
-  use _ <- result.try(simplifile.append(to: log_file_path, contents: contents))
-  Ok(Entry(
-    headers: req.headers,
-    ts: stamp,
-    user_agent: user_agent,
-    ip: ip,
-    query: query_string,
-    body: actual_body,
-    kind: kind,
-  ))
+  json.to_string(payload) <> "\n"
 }
 
 fn read_entries() -> Result(List(Entry), simplifile.FileError) {
+  use contents <- result.try(simplifile.read(log_file_path))
+  use entries <- result.try(
+    contents
+    |> string.split(on: "\n")
+    |> list.reverse()
+    |> list.drop(1)
+    |> list.take(20)
+    |> list.try_map(parse_entry)
+    |> result.replace_error(simplifile.Unknown("Failed to parse")),
+  )
+
+  Ok(entries)
+}
+
+pub fn parse_entry(line: String) -> Result(Entry, json.DecodeError) {
   let header_decoder = {
     use key <- decode.field(0, decode.string)
     use value <- decode.field(1, decode.string)
@@ -253,18 +275,7 @@ fn read_entries() -> Result(List(Entry), simplifile.FileError) {
     ))
   }
 
-  use contents <- result.try(simplifile.read(log_file_path))
-  use entries <- result.try(
-    contents
-    |> string.split(on: "\n")
-    |> list.reverse()
-    |> list.drop(1)
-    |> list.take(20)
-    |> list.try_map(fn(raw) { json.parse(raw, decoder) })
-    |> result.replace_error(simplifile.Unknown("Failed to parse")),
-  )
-
-  Ok(entries)
+  json.parse(line, decoder)
 }
 
 fn kind_to_string(kind: Kind) -> String {
