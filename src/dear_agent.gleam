@@ -355,10 +355,12 @@ fn entry_view(entry: Entry) -> element.Element(msg) {
       ],
     ])
 
+  let now = timestamp.system_time()
+
   html.details([attribute.class("entry")], [
     html.summary([], [
       html.span([attribute.class("col-ts")], [
-        element.text(relative_time(entry.ts)),
+        element.text(relative_time(entry.ts, now)),
       ]),
       html.span([attribute.class("col-method " <> method_mod)], [
         element.text(method_text),
@@ -385,21 +387,23 @@ fn headers_view(headers: List(#(String, String))) -> element.Element(msg) {
   )
 }
 
-fn relative_time(timestamp_string: String) -> String {
+pub fn relative_time(
+  timestamp_string: String,
+  now: timestamp.Timestamp,
+) -> String {
   case timestamp.parse_rfc3339(timestamp_string) {
     Ok(ts) -> {
-      let now = timestamp.system_time()
-      let diff = timestamp.difference(now, ts)
+      let diff = timestamp.difference(ts, now)
       case duration.to_seconds(diff) {
         seconds if seconds <. 60.0 -> "just now"
         seconds if seconds <. 3600.0 ->
-          int.to_string(float.truncate(seconds /. 60.0)) <> " minutes ago"
+          int.to_string(float.truncate(seconds /. 60.0)) <> "m ago"
         seconds if seconds <. 86_400.0 ->
-          int.to_string(float.truncate(seconds /. 3600.0)) <> " hours ago"
+          int.to_string(float.truncate(seconds /. 3600.0)) <> "h ago"
         seconds if seconds <. 604_800.0 ->
-          int.to_string(float.truncate(seconds /. 86_400.0)) <> " days ago"
+          int.to_string(float.truncate(seconds /. 86_400.0)) <> "d ago"
         seconds ->
-          int.to_string(float.truncate(seconds /. 604_800.0)) <> " weeks ago"
+          int.to_string(float.truncate(seconds /. 604_800.0)) <> "w ago"
       }
     }
     Error(_) -> {
