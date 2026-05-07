@@ -38,10 +38,14 @@ type Kind {
   Probe
 }
 
+const log_file_directory: String = "data"
+
+const log_file_path: String = log_file_directory <> "/log"
+
 pub fn main() -> Nil {
   wisp.configure_logger()
 
-  let assert Ok(_) = simplifile.create_directory_all("/tmp/dear_agent")
+  let assert Ok(_) = simplifile.create_directory_all(log_file_directory)
   let name = process.new_name("entries")
   let assert Ok(entries) = case read_entries() {
     Error(simplifile.Enoent) -> Ok([])
@@ -61,6 +65,7 @@ pub fn main() -> Nil {
     |> wisp_mist.handler(wisp.random_string(32))
     |> mist.new()
     |> mist.port(3999)
+    |> mist.bind("0.0.0.0")
     |> mist.start()
 
   process.sleep_forever()
@@ -166,8 +171,6 @@ fn handle_message(
     }
   }
 }
-
-const log_file_path: String = "/tmp/dear_agent/log"
 
 fn record(
   req: wisp.Request,
