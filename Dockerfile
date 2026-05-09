@@ -12,8 +12,9 @@ FROM erlang:${ERLANG_VERSION}-alpine
 RUN \
   addgroup --system webapp && \
   adduser --system webapp -g webapp
-USER webapp
 COPY --from=build /app/build/erlang-shipment /app
+RUN mkdir -p /app/data && chown webapp:webapp /app/data
+USER webapp
 WORKDIR /app
 ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["run"]
